@@ -19,6 +19,8 @@ LINE_COLOR = (100, 100, 100, 128)
 
 COLLISION_THRESHOLD = 30
 
+STOP_TIME_THRESHOLD = 10.0  # seconds
+
 
 class SimulationCase(Enum):
     NORMAL = "Normal Case"
@@ -152,6 +154,12 @@ class Simulator:
             self.setup_stage = 1  # Start at stage 1: placing robot
             self.placing_robot = True
             self.paused = True  # Start paused in setup mode
+            
+            # NEW: Initialize storage for initial positions (for W key reset)
+            if hasattr(self, "initial_setup_robot_pos"):
+                delattr(self, "initial_setup_robot_pos")
+            if hasattr(self, "initial_setup_algae_pos"):
+                delattr(self, "initial_setup_algae_pos")
 
         # Common settings for all cases
         self.current_case = case
@@ -254,12 +262,24 @@ class Simulator:
 
                 # Check if interception happens after algae has stopped
                 if intercept_time > t_stop_algae:
-                    self.intercept_point = intercept_point
-                    self.intercept_time = intercept_time
-                    self.intercept_calculated = True
-                    # Store direct path to intercept point as a fixed target
-                    self.fixed_target = self.intercept_point.copy()
-                    return
+                    #  Check if intercept time is more than the set stop time
+                    if intercept_time > STOP_TIME_THRESHOLD:
+                        self.intercept_point = intercept_point
+                        self.intercept_time = intercept_time
+                        self.intercept_calculated = True
+                        self.fixed_target = self.intercept_point.copy()
+                        self.predicted_robot_path = self.calculate_predicted_robot_path(intercept_time)
+                        self.paused = True  # Pause if intercept time > 10
+                        return
+                    else:
+                        self.intercept_point = intercept_point
+                        self.intercept_time = intercept_time
+                        self.intercept_calculated = True
+                        # Store direct path to intercept point as a fixed target
+                        self.fixed_target = self.intercept_point.copy()
+                        # Store the predicted path for navigation
+                        self.predicted_robot_path = self.calculate_predicted_robot_path(intercept_time)
+                        return
 
         # For interception before algae stops or with continuous motion,
         # First, check if interception is even possible:
@@ -274,18 +294,98 @@ class Simulator:
                     self.intercept_time = None
                     self.intercept_calculated = False
                     self.fixed_target = None
+                    self.predicted_robot_path = None
                     return
 
         # Use numerical solution with differential equations for the general case
         self.find_intercept_numerical(max_time=30.0)
         
+        # Check if intercept time is more than 10 seconds
+        if self.intercept_time is not None and self.intercept_time > 10.0:
+            self.paused = True  # Pause simulation if intercept time > 10
+            
         # After calculating intercept_point, store it as the fixed target
         if self.intercept_point is not None:
             self.fixed_target = self.intercept_point.copy()
+            # Generate the predicted robot path for accurate navigation
+            self.predicted_robot_path = self.calculate_predicted_robot_path(self.intercept_time)
         else:
             self.fixed_target = None
+            self.predicted_robot_path = None
             # Don't run the simulation if there's no intercept point
             self.paused = True
+    """
+    Calculate the predicted robot path to the interception point.
+    This provides a trajectory for the robot to follow for precise interception.
+
+    Args:
+        intercept_time (float): The predicted time of interception
+
+    Returns:
+        list: List of predicted robot positions at each time step
+    """
+    def calculate_predicted_robot_path(self, intercept_time):
+        
+        if self.intercept_point is None or intercept_time is None:
+            return None
+            
+        # Initial state
+        predicted_path = []
+        robot_pos = self.robot_pos.copy()
+        robot_vel = self.robot_vel.copy()
+        target_pos = self.intercept_point.copy()
+        
+        # Calculate time steps
+        steps = int(intercept_time / self.dt)
+        time_remaining = intercept_time
+        
+        # Generate path points
+        for _ in range(steps):
+            predicted_path.append(robot_pos.copy())
+            
+            # Calculate optimal direction and acceleration for precise arrival
+            time_remaining -= self.dt
+            if time_remaining <= 0:
+                break
+                
+            # Vector to target
+            dir_to_target = target_pos - robot_pos
+            distance = np.linalg.norm(dir_to_target)
+            
+            if distance < 1e-6:  # Already at target
+                continue
+                
+            dir_to_target = dir_to_target / distance
+            
+            # Calculate optimal acceleration using time-to-go guidance
+            # This uses a proportional navigation approach adjusted for remaining time
+            # v = d/t where d is remaining distance and t is remaining time
+            desired_speed = distance / max(time_remaining, self.dt)
+            desired_speed = min(desired_speed, self.robot_max_vel)
+            
+            # Desired velocity vector
+            desired_vel = dir_to_target * desired_speed
+            
+            # Calculate acceleration needed
+            accel_vec = (desired_vel - robot_vel) / self.dt
+            accel_mag = np.linalg.norm(accel_vec)
+            
+            # Limit acceleration to maximum
+            if accel_mag > self.robot_acc:
+                accel_vec = accel_vec * (self.robot_acc / accel_mag)
+                
+            # Apply acceleration
+            robot_vel += accel_vec * self.dt
+            
+            # Limit to max velocity
+            speed = np.linalg.norm(robot_vel)
+            if speed > self.robot_max_vel:
+                robot_vel = (robot_vel / speed) * self.robot_max_vel
+                
+            # Update position
+            robot_pos += robot_vel * self.dt
+            
+        return predicted_path
 
     """
     Calculate the time required for the robot to reach a specific position
@@ -385,8 +485,7 @@ class Simulator:
     with the numerical solution results.
     """
     def find_intercept_numerical(self, max_time=30.0):
-
-        # Initial states
+        # Initial states - use float64 for better precision
         robot_pos = self.robot_pos.copy().astype(np.float64)
         robot_vel = self.robot_vel.copy().astype(np.float64)
         algae_pos = self.algae_pos.copy().astype(np.float64)
@@ -415,7 +514,7 @@ class Simulator:
                 min_distance_positions = (robot_pos.copy(), algae_pos.copy())
 
             # Check for interception - use the same threshold as in simulate_step
-            if current_distance < COLLISION_THRESHOLD:
+            if current_distance < COLLISION_THRESHOLD:  # Threshold for interception
                 self.intercept_point = (
                     robot_pos.copy() + algae_pos.copy()
                 ) / 2  # Midpoint between them
@@ -485,39 +584,74 @@ class Simulator:
     deceleration, and collision detection.
     """
     def simulate_step(self):
-      
-         # Don't proceed if paused or if there's no interception possible
+        # Don't proceed if paused or if there's no interception possible
         if self.paused or self.fixed_target is None:
             return
 
-        # Use the fixed target point instead of constantly recalculating direction to algae
-        # if hasattr(self, 'fixed_target') and self.fixed_target is not None:
-        #     # Direct path to the intercept point
-        #     dir_to_target = self.fixed_target - self.robot_pos
-        #     if np.linalg.norm(dir_to_target) > 0:  # Avoid division by zero
-        #         dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
-        #     else:
-        #         dir_to_target = np.array([0.0, 0.0])
-        # else:
-        #     # Fallback to original behavior if no intercept is calculated
-        #     dir_to_algae = self.algae_pos - self.robot_pos
-        #     if np.linalg.norm(dir_to_algae) > 0:  # Avoid division by zero
-        #         dir_to_target = dir_to_algae / np.linalg.norm(dir_to_algae)
-        #     else:
-        #         dir_to_target = np.array([0.0, 0.0])
+        # Calculate time elapsed in the simulation
+        elapsed_time = self.time
         
-        # Always use the fixed target point instead of current algae position
-        dir_to_target = self.fixed_target - self.robot_pos
-        if np.linalg.norm(dir_to_target) > 0:  # Avoid division by zero
-            dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+        # Check if we have a predicted path to follow
+        if hasattr(self, 'predicted_robot_path') and self.predicted_robot_path:
+            # Find the closest timepoint in our predicted path
+            time_index = int(elapsed_time / self.dt)
+            if time_index < len(self.predicted_robot_path):
+                # Use the predicted position for this time step as our target
+                current_target = self.predicted_robot_path[time_index]
+                
+                # Calculate direction to the current waypoint
+                dir_to_target = current_target - self.robot_pos
+                distance_to_waypoint = np.linalg.norm(dir_to_target)
+                
+                if distance_to_waypoint > 0:
+                    dir_to_target = dir_to_target / distance_to_waypoint
+                else:
+                    # If we're at the waypoint, aim directly for the final target
+                    dir_to_target = self.fixed_target - self.robot_pos
+                    if np.linalg.norm(dir_to_target) > 0:
+                        dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+                    else:
+                        dir_to_target = np.array([0.0, 0.0])
+                        
+                # Calculate time remaining until interception
+                time_remaining = max(0.001, self.intercept_time - elapsed_time)
+                
+                # Calculate optimal acceleration with proportional navigation
+                # Adjust velocity based on remaining distance and time
+                remaining_distance = np.linalg.norm(self.fixed_target - self.robot_pos)
+                desired_speed = min(remaining_distance / time_remaining, self.robot_max_vel)
+                
+                # Current velocity in the desired direction
+                current_vel_magnitude = np.dot(self.robot_vel, dir_to_target)
+                
+                # Determine if we need to accelerate or decelerate
+                if current_vel_magnitude < desired_speed:
+                    # Need to accelerate
+                    self.robot_vel += dir_to_target * self.robot_acc * self.dt
+                else:
+                    # Need to decelerate or maintain speed
+                    # Calculate deceleration needed
+                    self.robot_vel = dir_to_target * desired_speed
+            else:
+                # We've run past our predicted path, aim directly at the target
+                dir_to_target = self.fixed_target - self.robot_pos
+                if np.linalg.norm(dir_to_target) > 0:
+                    dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+                else:
+                    dir_to_target = np.array([0.0, 0.0])
+                
+                # Apply acceleration in direction of target
+                self.robot_vel += dir_to_target * self.robot_acc * self.dt
         else:
-            dir_to_target = np.array([0.0, 0.0])
-
-        # Apply acceleration in direction of target
-        # self.robot_vel += dir_to_target * self.robot_acc * self.dt
-        
-        # Apply acceleration in direction of target
-        self.robot_vel += dir_to_target * self.robot_acc * self.dt
+            # If no predicted path exists, fall back to direct navigation
+            dir_to_target = self.fixed_target - self.robot_pos
+            if np.linalg.norm(dir_to_target) > 0:
+                dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+            else:
+                dir_to_target = np.array([0.0, 0.0])
+            
+            # Apply acceleration in direction of target
+            self.robot_vel += dir_to_target * self.robot_acc * self.dt
 
         # Limit to max velocity
         speed = np.linalg.norm(self.robot_vel)
@@ -972,7 +1106,6 @@ class Simulator:
     """
     def handle_playground_events(self, event):
         # Handle events specific to playground mode
-
         if event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:  # Left click
                 mouse_pos = np.array(pygame.mouse.get_pos(), dtype=np.float64)
@@ -1164,6 +1297,39 @@ class Simulator:
             elif event.key == pygame.K_BACKSPACE:
                 # Restore previous state (soft reset)
                 self.restore_previous_state()
+            #  W key resets positions to starting points in playground mode
+            elif event.key == pygame.K_w:
+                # Store current velocities
+                robot_vel_temp = self.robot_vel.copy()
+                algae_vel_temp = self.algae_vel.copy()
+                
+                # Reset positions to initial positions from when playground mode was entered
+                if hasattr(self, "initial_setup_robot_pos"):
+                    self.robot_pos = self.initial_setup_robot_pos.copy()
+                else:
+                    # If no initial positions stored, save current ones for future resets
+                    self.initial_setup_robot_pos = self.robot_pos.copy()
+                    
+                if hasattr(self, "initial_setup_algae_pos"):
+                    self.algae_pos = self.initial_setup_algae_pos.copy()
+                else:
+                    # If no initial positions stored, save current ones for future resets
+                    self.initial_setup_algae_pos = self.algae_pos.copy()
+                    
+                # Keep the velocities the same
+                self.robot_vel = robot_vel_temp
+                self.algae_vel = algae_vel_temp
+                
+                # Reset paths
+                self.path_points_robot = [self.robot_pos.copy()]
+                self.path_points_algae = [self.algae_pos.copy()]
+                
+                # Reset time
+                self.time = 0.0
+                
+                # Recalculate interception
+                self.calculate_intercept()
+                
             elif event.key == pygame.K_RETURN:
                 # Start simulation
                 self.setup_completed = True
@@ -1171,8 +1337,12 @@ class Simulator:
                 self.paused = False
                 self.path_points_robot = [self.robot_pos.copy()]
                 self.path_points_algae = [self.algae_pos.copy()]
+                
+                # Store initial positions for W key reset functionality
+                self.initial_setup_robot_pos = self.robot_pos.copy()
+                self.initial_setup_algae_pos = self.algae_pos.copy()
+                
                 self.calculate_intercept()
-
     """
     Main simulation loop. Handles events, updates simulation state,
     renders graphics, and maintains timing.
