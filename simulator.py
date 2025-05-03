@@ -104,6 +104,7 @@ class Simulator:
         self.robot_acc = 100.0
         self.robot_max_vel = 200.0
         self.algae_decel = 0.0
+        self.fixed_target = None  # Reset the fixed target
 
         # Additional playground mode variables
         self.playground_mode = False
@@ -166,6 +167,8 @@ class Simulator:
         # Only calculate intercept if not in playground mode or setup is completed
         if not self.playground_mode or self.setup_completed:
             self.calculate_intercept()
+        
+        
 
     """
     Restore the simulation to its previous state before the last reset.
@@ -239,13 +242,6 @@ class Simulator:
             t_stop_algae = float("inf")
             algae_final_pos = None  # Will not stop
 
-        """
-        We need to solve for interception in multiple cases:
-            1. Interception before algae stops
-            2. Interception after algae stops
-            3. No interception possible
-        """
-
         # Try solving for interception after algae stops first (simpler case)
         if t_stop_algae < float("inf"):
             # Calculate time to reach the stationary algae position
@@ -261,18 +257,11 @@ class Simulator:
                     self.intercept_point = intercept_point
                     self.intercept_time = intercept_time
                     self.intercept_calculated = True
+                    # Store direct path to intercept point as a fixed target
+                    self.fixed_target = self.intercept_point.copy()
                     return
 
-        """
-        If we get here, either:
-            1. Algae doesn't stop, or
-            2. Interception happens before algae stops, or
-            3. No interception after algae stops
-        
-        """
-
         # For interception before algae stops or with continuous motion,
-
         # First, check if interception is even possible:
         # If algae is faster than robot's max speed and moving away
         if algae_speed > v_max:
@@ -284,10 +273,19 @@ class Simulator:
                     self.intercept_point = None
                     self.intercept_time = None
                     self.intercept_calculated = False
+                    self.fixed_target = None
                     return
 
         # Use numerical solution with differential equations for the general case
         self.find_intercept_numerical(max_time=30.0)
+        
+        # After calculating intercept_point, store it as the fixed target
+        if self.intercept_point is not None:
+            self.fixed_target = self.intercept_point.copy()
+        else:
+            self.fixed_target = None
+            # Don't run the simulation if there's no intercept point
+            self.paused = True
 
     """
     Calculate the time required for the robot to reach a specific position
@@ -487,17 +485,39 @@ class Simulator:
     deceleration, and collision detection.
     """
     def simulate_step(self):
-        # Update positions for one time step
-        if self.paused:
+      
+         # Don't proceed if paused or if there's no interception possible
+        if self.paused or self.fixed_target is None:
             return
 
-        # Update robot velocity and position
-        dir_to_algae = self.algae_pos - self.robot_pos
-        if np.linalg.norm(dir_to_algae) > 0:  # Avoid division by zero
-            dir_to_algae = dir_to_algae / np.linalg.norm(dir_to_algae)
+        # Use the fixed target point instead of constantly recalculating direction to algae
+        # if hasattr(self, 'fixed_target') and self.fixed_target is not None:
+        #     # Direct path to the intercept point
+        #     dir_to_target = self.fixed_target - self.robot_pos
+        #     if np.linalg.norm(dir_to_target) > 0:  # Avoid division by zero
+        #         dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+        #     else:
+        #         dir_to_target = np.array([0.0, 0.0])
+        # else:
+        #     # Fallback to original behavior if no intercept is calculated
+        #     dir_to_algae = self.algae_pos - self.robot_pos
+        #     if np.linalg.norm(dir_to_algae) > 0:  # Avoid division by zero
+        #         dir_to_target = dir_to_algae / np.linalg.norm(dir_to_algae)
+        #     else:
+        #         dir_to_target = np.array([0.0, 0.0])
+        
+        # Always use the fixed target point instead of current algae position
+        dir_to_target = self.fixed_target - self.robot_pos
+        if np.linalg.norm(dir_to_target) > 0:  # Avoid division by zero
+            dir_to_target = dir_to_target / np.linalg.norm(dir_to_target)
+        else:
+            dir_to_target = np.array([0.0, 0.0])
 
-        # Apply acceleration in direction of algae
-        self.robot_vel += dir_to_algae * self.robot_acc * self.dt
+        # Apply acceleration in direction of target
+        # self.robot_vel += dir_to_target * self.robot_acc * self.dt
+        
+        # Apply acceleration in direction of target
+        self.robot_vel += dir_to_target * self.robot_acc * self.dt
 
         # Limit to max velocity
         speed = np.linalg.norm(self.robot_vel)
@@ -1204,7 +1224,7 @@ class Simulator:
                 if self.playground_mode and not self.setup_completed:
                     self.handle_playground_events(event)
 
-            if not (self.playground_mode and not self.setup_completed):
+            if not (self.playground_mode and not self.setup_completed) and self.fixed_target is not None:
                 self.simulate_step()
             self.draw()
             self.clock.tick(60)
