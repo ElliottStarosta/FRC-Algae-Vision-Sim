@@ -1,4 +1,4 @@
-# Robot-Algae Interception Simulator: Mathematical Principles
+# FRC Robot-Algae Interception Simulator: Mathematical Principles
 
 This document explains the mathematical foundations behind the robot-algae interception simulation. The simulator models a robot that must intercept moving algae (or a ball) based on physics principles and optimization algorithms.
 

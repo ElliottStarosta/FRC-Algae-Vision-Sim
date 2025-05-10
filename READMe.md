@@ -1,4 +1,4 @@
-# Robot-Algae Interception Simulator
+# FRC Robot-Algae Interception Simulator 
 
 A physics-based simulation that demonstrates interception between a robot (blue) and a moving algae target (green). This simulator visualizes various interception scenarios considering acceleration constraints, maximum velocity, deceleration effects, and predictive targeting.
 
